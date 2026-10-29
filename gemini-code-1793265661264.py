@@ -1,0 +1,411 @@
+import streamlit as st
+import sqlite3
+import hashlib
+import pandas as pd
+import plotly.express as px
+from datetime import datetime
+
+# ---------------------------------------------------------
+# PAGE CONFIGURATION
+# ---------------------------------------------------------
+st.set_page_config(
+    page_title="Smart Bakery Management System",
+    page_icon="🥐",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom Styling (Warm Bakery Theme)
+st.markdown("""
+    <style>
+        .main { background-color: #FAF6F0; }
+        .stButton>button {
+            background-color: #8B4513;
+            color: white;
+            border-radius: 8px;
+            font-weight: bold;
+        }
+        .stButton>button:hover {
+            background-color: #D2691E;
+            color: white;
+        }
+        .metric-card {
+            background-color: #FFFFFF;
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            border-left: 5px solid #8B4513;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# ---------------------------------------------------------
+# DATABASE SETUP & BACKEND UTILITIES
+# ---------------------------------------------------------
+DB_FILE = "bakery_system.db"
+
+def get_db():
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Users Table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT DEFAULT 'Staff'
+        )
+    """)
+    
+    # Products Table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            price REAL NOT NULL,
+            stock INTEGER NOT NULL,
+            image_url TEXT
+        )
+    """)
+    
+    # Sales Table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_name TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            total_price REAL NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # Blogs / Announcements Table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS blogs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            author TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # Seed Products if Empty
+    cursor.execute("SELECT COUNT(*) FROM products")
+    if cursor.fetchone()[0] == 0:
+        sample_products = [
+            ("Artisan Sourdough", "Breads", 6.50, 25, "https://images.unsplash.com/photo-1586444248902-2f64eddc13df?auto=format&fit=crop&w=600&q=80"),
+            ("Butter Croissant", "Pastries", 3.75, 40, "https://images.unsplash.com/photo-1555507036-ab1f4038808a?auto=format&fit=crop&w=600&q=80"),
+            ("Velvet Cupcake", "Cakes", 4.20, 15, "https://images.unsplash.com/photo-1576618148400-f54bed99fcfd?auto=format&fit=crop&w=600&q=80"),
+            ("Custom Celebration Cake", "Cakes", 45.00, 5, "https://images.unsplash.com/photo-1535141192574-5d4897c13136?auto=format&fit=crop&w=600&q=80")
+        ]
+        cursor.executemany("INSERT INTO products (name, category, price, stock, image_url) VALUES (?, ?, ?, ?, ?)", sample_products)
+    
+    conn.commit()
+    conn.close()
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+init_db()
+
+# Session State Initialization
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "user" not in st.session_state:
+    st.session_state.user = None
+if "cart" not in st.session_state:
+    st.session_state.cart = []
+
+# ---------------------------------------------------------
+# AUTHENTICATION FUNCTIONS
+# ---------------------------------------------------------
+def register_user(username, email, password):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO users (username, email, password) VALUES (?, ?, ?)",
+            (username, email, hash_password(password))
+        )
+        conn.commit()
+        return True, "Registration successful! Please log in."
+    except sqlite3.IntegrityError:
+        return False, "Username or Email already exists."
+    finally:
+        conn.close()
+
+def login_user(username, password):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM users WHERE username = ? AND password = ?",
+        (username, hash_password(password))
+    )
+    user = cursor.fetchone()
+    conn.close()
+    if user:
+        return True, dict(user)
+    return False, "Invalid username or password."
+
+# ---------------------------------------------------------
+# SIDEBAR NAVIGATION & AUTHENTICATION
+# ---------------------------------------------------------
+st.sidebar.title("🥐 Smart Bakery POS")
+
+if not st.session_state.authenticated:
+    auth_mode = st.sidebar.radio("Account Access", ["Login", "Register"])
+    
+    if auth_mode == "Login":
+        st.sidebar.subheader("Login to Bakery Console")
+        login_user_input = st.sidebar.text_input("Username")
+        login_pass_input = st.sidebar.text_input("Password", type="password")
+        if st.sidebar.button("Login"):
+            success, res = login_user(login_user_input, login_pass_input)
+            if success:
+                st.session_state.authenticated = True
+                st.session_state.user = res
+                st.sidebar.success(f"Welcome back, {res['username']}!")
+                st.rerun()
+            else:
+                st.sidebar.error(res)
+                
+    elif auth_mode == "Register":
+        st.sidebar.subheader("Create Staff Account")
+        reg_user = st.sidebar.text_input("Username")
+        reg_email = st.sidebar.text_input("Email")
+        reg_pass = st.sidebar.text_input("Password", type="password")
+        if st.sidebar.button("Register"):
+            if reg_user and reg_email and reg_pass:
+                success, msg = register_user(reg_user, reg_email, reg_pass)
+                if success:
+                    st.sidebar.success(msg)
+                else:
+                    st.sidebar.error(msg)
+            else:
+                st.sidebar.warning("Fill in all fields.")
+
+else:
+    st.sidebar.write(f"Logged in as: **{st.session_state.user['username']}**")
+    if st.sidebar.button("Logout"):
+        st.session_state.authenticated = False
+        st.session_state.user = None
+        st.session_state.cart = []
+        st.rerun()
+
+    menu = st.sidebar.selectbox(
+        "Navigation",
+        ["🛒 POS & Sales", "📦 Inventory", "📝 Blog & News", "📊 Analytics Dashboard"]
+    )
+
+# ---------------------------------------------------------
+# MAIN CONTENT AREA
+# ---------------------------------------------------------
+
+if not st.session_state.authenticated:
+    st.title("🥖 Welcome to Smart Bakery Management System")
+    st.info("Please Log in or Register using the sidebar to access POS, inventory, and management tools.")
+    
+    # Display public promotional items
+    st.subheader("Featured Bakery Items")
+    conn = get_db()
+    products = pd.read_sql("SELECT * FROM products", conn)
+    conn.close()
+    
+    cols = st.columns(len(products))
+    for idx, row in products.iterrows():
+        with cols[idx % len(cols)]:
+            st.image(row["image_url"], use_column_width=True)
+            st.markdown(f"**{row['name']}**")
+            st.write(f"Price: **${row['price']:.2f}**")
+
+# ---------------------------------------------------------
+# MODULE 1: POS & SALES TERMINAL
+# ---------------------------------------------------------
+elif menu == "🛒 POS & Sales":
+    st.title("🛒 Point of Sale (POS) Terminal")
+    
+    col_products, col_cart = st.columns([2, 1])
+    
+    conn = get_db()
+    products = pd.read_sql("SELECT * FROM products", conn)
+    conn.close()
+    
+    with col_products:
+        st.subheader("Menu Items")
+        item_cols = st.columns(2)
+        
+        for idx, row in products.iterrows():
+            with item_cols[idx % 2]:
+                st.image(row["image_url"], height=150, use_column_width=True)
+                st.markdown(f"### {row['name']}")
+                st.write(f"Category: `{row['category']}` | Price: **${row['price']:.2f}**")
+                st.write(f"Stock: `{row['stock']}` items left")
+                
+                if row["stock"] > 0:
+                    if st.button(f"Add to Cart", key=f"add_{row['id']}"):
+                        st.session_state.cart.append({
+                            "id": row["id"],
+                            "name": row["name"],
+                            "price": row["price"]
+                        })
+                        st.toast(f"Added {row['name']} to cart!")
+                else:
+                    st.error("Out of Stock")
+                st.divider()
+
+    with col_cart:
+        st.subheader("Current Order")
+        if not st.session_state.cart:
+            st.write("Cart is empty.")
+        else:
+            total = 0
+            cart_df = pd.DataFrame(st.session_state.cart)
+            st.dataframe(cart_df[["name", "price"]], hide_index=True, use_container_width=True)
+            
+            total = cart_df["price"].sum()
+            st.markdown(f"### Total: `${total:.2f}`")
+            
+            if st.button("Complete Checkout"):
+                conn = get_db()
+                cursor = conn.cursor()
+                
+                for item in st.session_state.cart:
+                    # Log sale
+                    cursor.execute(
+                        "INSERT INTO sales (product_name, quantity, total_price) VALUES (?, ?, ?)",
+                        (item["name"], 1, item["price"])
+                    )
+                    # Update stock
+                    cursor.execute(
+                        "UPDATE products SET stock = stock - 1 WHERE id = ? AND stock > 0",
+                        (item["id"],)
+                    )
+                
+                conn.commit()
+                conn.close()
+                
+                st.success("Sale completed successfully!")
+                st.session_state.cart = []
+                st.rerun()
+
+            if st.button("Clear Cart"):
+                st.session_state.cart = []
+                st.rerun()
+
+# ---------------------------------------------------------
+# MODULE 2: INVENTORY MANAGEMENT
+# ---------------------------------------------------------
+elif menu == "📦 Inventory":
+    st.title("📦 Inventory & Stock Management")
+    
+    conn = get_db()
+    
+    # Add Product Form
+    with st.expander("➕ Add New Bakery Item"):
+        with st.form("add_product_form"):
+            p_name = st.text_input("Product Name")
+            p_cat = st.selectbox("Category", ["Breads", "Pastries", "Cakes", "Beverages"])
+            p_price = st.number_input("Price ($)", min_value=0.1, value=5.0)
+            p_stock = st.number_input("Stock Quantity", min_value=1, value=20)
+            p_img = st.text_input("Image URL", value="https://images.unsplash.com/photo-1586444248902-2f64eddc13df?auto=format&fit=crop&w=600&q=80")
+            
+            if st.form_submit_button("Add Item"):
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO products (name, category, price, stock, image_url) VALUES (?, ?, ?, ?, ?)",
+                    (p_name, p_cat, p_price, p_stock, p_img)
+                )
+                conn.commit()
+                st.success(f"Added '{p_name}' to inventory.")
+                st.rerun()
+
+    # Inventory Overview Table
+    products_df = pd.read_sql("SELECT * FROM products", conn)
+    conn.close()
+    
+    st.subheader("Current Stock Levels")
+    st.dataframe(products_df, use_container_width=True, hide_index=True)
+
+# ---------------------------------------------------------
+# MODULE 3: BLOG & ANNOUNCEMENT CREATION
+# ---------------------------------------------------------
+elif menu == "📝 Blog & News":
+    st.title("📝 Bakery Blog & Public Announcements")
+    
+    st.subheader("Create New Blog Post")
+    with st.form("create_blog_form"):
+        b_title = st.text_input("Blog / Recipe Title")
+        b_content = st.text_area("Content")
+        submit_blog = st.form_submit_button("Publish Post")
+        
+        if submit_blog:
+            if b_title and b_content:
+                conn = get_db()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO blogs (title, content, author) VALUES (?, ?, ?)",
+                    (b_title, b_content, st.session_state.user["username"])
+                )
+                conn.commit()
+                conn.close()
+                st.success("Blog published successfully!")
+                st.rerun()
+            else:
+                st.error("Please provide both title and content.")
+
+    st.divider()
+    st.subheader("Published Posts")
+    conn = get_db()
+    blogs_df = pd.read_sql("SELECT * FROM blogs ORDER BY created_at DESC", conn)
+    conn.close()
+    
+    for idx, row in blogs_df.iterrows():
+        with st.container():
+            st.markdown(f"### {row['title']}")
+            st.caption(f"By {row['author']} on {row['created_at']}")
+            st.write(row['content'])
+            st.divider()
+
+# ---------------------------------------------------------
+# MODULE 4: ANALYTICS DASHBOARD
+# ---------------------------------------------------------
+elif menu == "📊 Analytics Dashboard":
+    st.title("📊 Sales & Performance Analytics")
+    
+    conn = get_db()
+    sales_df = pd.read_sql("SELECT * FROM sales", conn)
+    products_df = pd.read_sql("SELECT * FROM products", conn)
+    conn.close()
+    
+    if sales_df.empty:
+        st.info("No sales records available yet. Complete transactions in the POS tab to view analytics.")
+    else:
+        # Key Metrics
+        total_revenue = sales_df["total_price"].sum()
+        total_items_sold = sales_df["quantity"].sum()
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Revenue", f"${total_revenue:.2f}")
+        c2.metric("Total Items Sold", f"{total_items_sold}")
+        c3.metric("Low Stock Items", len(products_df[products_df["stock"] < 10]))
+
+        st.divider()
+        
+        # Sales Breakdown Chart
+        fig = px.pie(
+            sales_df, 
+            names="product_name", 
+            values="total_price", 
+            title="Revenue Distribution by Product",
+            color_discrete_sequence=px.colors.sequential.Oranges_r
+        )
+        st.plotly_chart(fig, use_container_width=True)
